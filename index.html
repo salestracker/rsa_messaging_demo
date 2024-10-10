@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Secure Document Encryption App</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1, h2 { color: #333; }
+        textarea, input { width: 100%; margin-bottom: 10px; }
+        button { margin-right: 10px; margin-bottom: 10px; }
+        #output { white-space: pre-wrap; background-color: #f0f0f0; padding: 10px; border-radius: 5px; }
+        .error { color: red; }
+        .success { color: green; }
+        .warning { color: orange; }
+        #status { margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Secure Document Encryption App</h1>
+    
+    <h2>Key Generation</h2>
+    <button id="generateKeyPair">Generate RSA Key Pair</button>
+    <button id="generateDEK">Generate DEK</button>
+    
+    <h2>Document Encryption/Decryption</h2>
+    <textarea id="documentInput" rows="5" placeholder="Enter your document text here"></textarea>
+    <button id="encryptDocument">Encrypt Document</button>
+    <button id="decryptDocument">Decrypt Document</button>
+    
+    <h2>DEK Encryption/Decryption</h2>
+    <button id="encryptDEK">Encrypt DEK with Public Key</button>
+    <button id="decryptDEK">Decrypt DEK with Private Key</button>
+    
+    <h2>Private Key Encryption/Decryption</h2>
+    <input type="password" id="passwordInput" placeholder="Enter password to encrypt/decrypt private key">
+    <button id="encryptPrivateKey">Encrypt Private Key</button>
+    <button id="decryptPrivateKey">Decrypt Private Key</button>
+    
+    <h2>Output</h2>
+    <div id="status"></div>
+    <div id="output"></div>
+    <button id="resetApp">Reset</button>
+
+    <script>
+    // Utility functions
+    const utils = {
+        arrayBufferToBase64: buffer => btoa(String.fromCharCode(...new Uint8Array(buffer))),
+        base64ToArrayBuffer: base64 => Uint8Array.from(atob(base64), c => c.charCodeAt(0)).buffer,
+        base64ToUint8Array: base64 => Uint8Array.from(atob(base64), c => c.charCodeAt(0)),
+        textToArrayBuffer: text => new TextEncoder().encode(text),
+        arrayBufferToText: buffer => new TextDecoder().decode(buffer),
+    };
+
+    // Cryptographic operations
+    const cryptoOps = {
+        generateKeyPair: async () => {
+            const keyPair = await window.crypto.subtle.generateKey(
+                {
+                    name: "RSA-OAEP",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true,
+                ["encrypt", "decrypt"]
+            );
+            const publicKeyJwk = await window.crypto.subtle.exportKey("jwk", keyPair.publicKey);
+            const privateKeyJwk = await window.crypto.subtle.exportKey("jwk", keyPair.privateKey);
+            return { publicKeyJwk, privateKeyJwk, keyPair };
+        },
+
+        generateDEK: () => window.crypto.getRandomValues(new Uint8Array(32)),
+
+        encrypt: async (key, data) => {
+            const cryptoKey = await window.crypto.subtle.importKey(
+                "raw",
+                key,
+                { name: "AES-GCM" },
+                false,
+                ['encrypt']
+            );
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const encryptedData = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv },
+                cryptoKey,
+                data
+            );
+            return { encryptedData, iv };
+        },
+
+        decrypt: async (key, data, iv) => {
+            const cryptoKey = await window.crypto.subtle.importKey(
+                "raw",
+                key,
+                { name: "AES-GCM" },
+                false,
+                ['decrypt']
+            );
+            const decryptedData = await window.crypto.subtle.decrypt(
+                { name: "AES-GCM", iv },
+                cryptoKey,
+                data
+            );
+            return decryptedData;
+        },
+
+        encryptRSA: async (publicKey, data) => {
+            return await window.crypto.subtle.encrypt(
+                { name: "RSA-OAEP" },
+                publicKey,
+                data
+            );
+        },
+
+        decryptRSA: async (privateKey, data) => {
+            return await window.crypto.subtle.decrypt(
+                { name: "RSA-OAEP" },
+                privateKey,
+                data
+            );
+        },
+
+        encryptPrivateKey: async (privateKeyJwk, password) => {
+            const salt = window.crypto.getRandomValues(new Uint8Array(16));
+            const keyMaterial = await window.crypto.subtle.importKey(
+                "raw",
+                utils.textToArrayBuffer(password),
+                { name: "PBKDF2" },
+                false,
+                ["deriveBits", "deriveKey"]
+            );
+            const key = await window.crypto.subtle.deriveKey(
+                {
+                    name: "PBKDF2",
+                    salt,
+                    iterations: 100000,
+                    hash: "SHA-256"
+                },
+                keyMaterial,
+                { name: "AES-GCM", length: 256 },
+                false,
+                ["encrypt", "decrypt"]
+            );
+            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const encryptedPrivateKey = await window.crypto.subtle.encrypt(
+                { name: "AES-GCM", iv },
+                key,
+                utils.textToArrayBuffer(JSON.stringify(privateKeyJwk))
+            );
+            return {
+                encryptedPrivateKey: utils.arrayBufferToBase64(encryptedPrivateKey),
+                salt: utils.arrayBufferToBase64(salt),
+                iv: utils.arrayBufferToBase64(iv)
+            };
+        },
+
+        decryptPrivateKey: async (encryptedData, password) => {
+            const salt = utils.base64ToUint8Array(encryptedData.salt);
+            const iv = utils.base64ToUint8Array(encryptedData.iv);
+            const encryptedPrivateKey = utils.base64ToUint8Array(encryptedData.encryptedPrivateKey);
+
+            const keyMaterial = await window.crypto.subtle.importKey(
+                "raw",
+                utils.textToArrayBuffer(password),
+                { name: "PBKDF2" },
+                false,
+                ["deriveBits", "deriveKey"]
+            );
+            const key = await window.crypto.subtle.deriveKey(
+                {
+                    name: "PBKDF2",
+                    salt,
+                    iterations: 100000,
+                    hash: "SHA-256"
+                },
+                keyMaterial,
+                { name: "AES-GCM", length: 256 },
+                false,
+                ["decrypt"]
+            );
+            const decryptedPrivateKey = await window.crypto.subtle.decrypt(
+                { name: "AES-GCM", iv },
+                key,
+                encryptedPrivateKey
+            );
+            return JSON.parse(utils.arrayBufferToText(decryptedPrivateKey));
+        }
+    };
+
+    // State management
+    const createStore = (initialState) => {
+        let state = initialState;
+        const listeners = new Set();
+
+        const getState = () => state;
+
+        const setState = (newState) => {
+            state = { ...state, ...newState };
+            listeners.forEach(listener => listener(state));
+        };
+
+        const subscribe = (listener) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+        };
+
+        return { getState, setState, subscribe };
+    };
+
+    // App state
+    const store = createStore({
+        keyPair: null,
+        publicKeyJwk: null,
+        privateKeyJwk: null,
+        dek: null,
+        encryptedDoc: null,
+        decryptedDoc: null,
+        encryptedDEK: null,
+        decryptedDEK: null,
+        encryptedPrivateKey: null,
+        decryptedPrivateKeyJwk: null,
+    });
+
+    // UI updates
+    const updateUI = (state) => {
+        const output = document.getElementById('output');
+
+        output.innerHTML = `<h3>Current State:</h3>`;
+
+        if (state.publicKeyJwk) {
+            output.innerHTML += `<p><strong>Public Key (JWK):</strong> ${JSON.stringify(state.publicKeyJwk, null, 2)}</p>`;
+        }
+
+        if (state.privateKeyJwk) {
+            output.innerHTML += `<p><strong>Private Key (JWK):</strong> ${JSON.stringify(state.privateKeyJwk, null, 2)}</p>`;
+            output.innerHTML += `<p class="warning">Warning: Never share your private key in a real application!</p>`;
+        }
+
+        if (state.dek) {
+            output.innerHTML += `<p><strong>DEK (Base64):</strong> ${state.dek}</p>`;
+        }
+
+        if (state.encryptedDoc) {
+            output.innerHTML += `<p><strong>Encrypted Document:</strong> ${JSON.stringify(state.encryptedDoc, null, 2)}</p>`;
+        }
+
+        if (state.decryptedDoc) {
+            output.innerHTML += `<p><strong>Decrypted Document:</strong> ${state.decryptedDoc}</p>`;
+        }
+
+        if (state.encryptedDEK) {
+            output.innerHTML += `<p><strong>Encrypted DEK (Base64):</strong> ${state.encryptedDEK}</p>`;
+        }
+
+        if (state.decryptedDEK) {
+            output.innerHTML += `<p><strong>Decrypted DEK (Base64):</strong> ${state.decryptedDEK}</p>`;
+            output.innerHTML += `<p><strong>Original DEK (Base64):</strong> ${state.dek}</p>`;
+        }
+
+        if (state.encryptedPrivateKey) {
+            output.innerHTML += `<p><strong>Encrypted Private Key:</strong> ${JSON.stringify(state.encryptedPrivateKey, null, 2)}</p>`;
+        }
+
+        if (state.decryptedPrivateKeyJwk) {
+            output.innerHTML += `<p><strong>Decrypted Private Key (JWK):</strong> ${JSON.stringify(state.decryptedPrivateKeyJwk, null, 2)}</p>`;
+        }
+    };
+
+    const updateStatus = (message, type) => {
+        const statusDiv = document.getElementById('status');
+        statusDiv.textContent = message;
+        statusDiv.className = type; // Adds 'success', 'error', or 'warning' class for styling
+    };
+
+    // Event handlers
+    const handlers = {
+        generateKeyPair: async () => {
+            try {
+                const { publicKeyJwk, privateKeyJwk, keyPair } = await cryptoOps.generateKeyPair();
+                store.setState({ keyPair, publicKeyJwk, privateKeyJwk });
+                updateUI(store.getState());
+                updateStatus('RSA key pair generated successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to generate RSA key pair: ' + error.message, 'error');
+            }
+        },
+
+        generateDEK: () => {
+            try {
+                const dek = cryptoOps.generateDEK();
+                store.setState({ dek: utils.arrayBufferToBase64(dek.buffer) });
+                updateUI(store.getState());
+                updateStatus('DEK generated successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to generate DEK: ' + error.message, 'error');
+            }
+        },
+
+        encryptDocument: async () => {
+            try {
+                const { dek } = store.getState();
+                if (!dek) throw new Error("Please generate DEK first");
+
+                const text = document.getElementById('documentInput').value;
+                const { encryptedData, iv } = await cryptoOps.encrypt(
+                    utils.base64ToUint8Array(dek),
+                    utils.textToArrayBuffer(text)
+                );
+                const encryptedDoc = {
+                    encryptedData: utils.arrayBufferToBase64(encryptedData),
+                    iv: utils.arrayBufferToBase64(iv)
+                };
+                store.setState({ encryptedDoc });
+                updateUI(store.getState());
+                updateStatus('Document encrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to encrypt document: ' + error.message, 'error');
+            }
+        },
+
+        decryptDocument: async () => {
+            try {
+                const { dek, encryptedDoc } = store.getState();
+                if (!dek || !encryptedDoc) throw new Error("Please encrypt a document first");
+
+                const decryptedData = await cryptoOps.decrypt(
+                    utils.base64ToUint8Array(dek),
+                    utils.base64ToArrayBuffer(encryptedDoc.encryptedData),
+                    utils.base64ToUint8Array(encryptedDoc.iv)
+                );
+                const decryptedDoc = utils.arrayBufferToText(decryptedData);
+                store.setState({ decryptedDoc });
+                updateUI(store.getState());
+                document.getElementById('documentInput').value = decryptedDoc;
+                updateStatus('Document decrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to decrypt document: ' + error.message, 'error');
+            }
+        },
+
+        encryptDEK: async () => {
+            try {
+                const { publicKeyJwk, dek } = store.getState();
+                if (!publicKeyJwk) throw new Error("Please generate RSA key pair first");
+                if (!dek) throw new Error("Please generate DEK first");
+
+                const publicKey = await window.crypto.subtle.importKey(
+                    "jwk",
+                    publicKeyJwk,
+                    { name: "RSA-OAEP", hash: "SHA-256" },
+                    false,
+                    ["encrypt"]
+                );
+
+                const encryptedDEK = await cryptoOps.encryptRSA(
+                    publicKey,
+                    utils.base64ToUint8Array(dek)
+                );
+                store.setState({ encryptedDEK: utils.arrayBufferToBase64(encryptedDEK) });
+                updateUI(store.getState());
+                updateStatus('DEK encrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to encrypt DEK: ' + error.message, 'error');
+            }
+        },
+
+        decryptDEK: async () => {
+            try {
+                const { privateKeyJwk, encryptedDEK } = store.getState();
+                if (!privateKeyJwk) throw new Error("Please generate RSA key pair first");
+                if (!encryptedDEK) throw new Error("Please encrypt DEK first");
+
+                const privateKey = await window.crypto.subtle.importKey(
+                    "jwk",
+                    privateKeyJwk,
+                    { name: "RSA-OAEP", hash: "SHA-256" },
+                    false,
+                    ["decrypt"]
+                );
+
+                const decryptedDEKBuffer = await cryptoOps.decryptRSA(
+                    privateKey,
+                    utils.base64ToArrayBuffer(encryptedDEK)
+                );
+                const decryptedDEKBase64 = utils.arrayBufferToBase64(decryptedDEKBuffer);
+                store.setState({ decryptedDEK: decryptedDEKBase64 });
+                updateUI(store.getState());
+                updateStatus('DEK decrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to decrypt DEK: ' + error.message, 'error');
+            }
+        },
+
+        encryptPrivateKey: async () => {
+            try {
+                const { privateKeyJwk } = store.getState();
+                const password = document.getElementById('passwordInput').value;
+                if (!privateKeyJwk) throw new Error("Please generate RSA key pair first");
+                if (!password) throw new Error("Please enter a password");
+
+                const encryptedPrivateKey = await cryptoOps.encryptPrivateKey(privateKeyJwk, password);
+                store.setState({ encryptedPrivateKey });
+                updateUI(store.getState());
+                updateStatus('Private key encrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to encrypt private key: ' + error.message, 'error');
+            }
+        },
+
+        decryptPrivateKey: async () => {
+            try {
+                const { encryptedPrivateKey } = store.getState();
+                const password = document.getElementById('passwordInput').value;
+                if (!encryptedPrivateKey) throw new Error("Please encrypt the private key first");
+                if (!password) throw new Error("Please enter a password");
+
+                const decryptedPrivateKeyJwk = await cryptoOps.decryptPrivateKey(encryptedPrivateKey, password);
+                store.setState({ decryptedPrivateKeyJwk });
+                updateUI(store.getState());
+                updateStatus('Private key decrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to decrypt private key: ' + error.message, 'error');
+            }
+        },
+
+        resetApp: () => {
+            store.setState({
+                keyPair: null,
+                publicKeyJwk: null,
+                privateKeyJwk: null,
+                dek: null,
+                encryptedDoc: null,
+                decryptedDoc: null,
+                encryptedDEK: null,
+                decryptedDEK: null,
+                encryptedPrivateKey: null,
+                decryptedPrivateKeyJwk: null,
+            });
+            document.getElementById('documentInput').value = '';
+            document.getElementById('passwordInput').value = '';
+            document.getElementById('status').textContent = '';
+            document.getElementById('output').innerHTML = '';
+            updateStatus('App state has been reset.', 'success');
+        },
+    };
+
+    // Event listeners
+    document.getElementById('generateKeyPair').addEventListener('click', handlers.generateKeyPair);
+    document.getElementById('generateDEK').addEventListener('click', handlers.generateDEK);
+    document.getElementById('encryptDocument').addEventListener('click', handlers.encryptDocument);
+    document.getElementById('decryptDocument').addEventListener('click', handlers.decryptDocument);
+    document.getElementById('encryptDEK').addEventListener('click', handlers.encryptDEK);
+    document.getElementById('decryptDEK').addEventListener('click', handlers.decryptDEK);
+    document.getElementById('encryptPrivateKey').addEventListener('click', handlers.encryptPrivateKey);
+    document.getElementById('decryptPrivateKey').addEventListener('click', handlers.decryptPrivateKey);
+    document.getElementById('resetApp').addEventListener('click', handlers.resetApp);
+    </script>
+</body>
+</html>
