@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Secure Document Encryption App</title>
+    <title>Secure Document and Audio Encryption App</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
         h1, h2 { color: #333; }
@@ -13,10 +13,11 @@
         .success { color: green; }
         .warning { color: orange; }
         #status { margin-bottom: 10px; }
+        #audioPlayer { width: 100%; margin-top: 10px; }
     </style>
 </head>
 <body>
-    <h1>Secure Document Encryption App</h1>
+    <h1>Secure Document and Audio Encryption App</h1>
     
     <h2>Key Generation</h2>
     <button id="generateKeyPair">Generate RSA Key Pair</button>
@@ -26,6 +27,16 @@
     <textarea id="documentInput" rows="5" placeholder="Enter your document text here"></textarea>
     <button id="encryptDocument">Encrypt Document</button>
     <button id="decryptDocument">Decrypt Document</button>
+    
+    <h2>Audio Encryption</h2>
+    <input type="file" id="audioFileInput" accept="audio/mpeg">
+    <button id="encryptAudio">Encrypt Audio File</button>
+    <button id="downloadEncryptedAudio">Download Encrypted Audio</button>
+    
+    <h2>Audio Decryption and Playback</h2>
+    <input type="text" id="encryptedAudioUrl" placeholder="Enter URL of encrypted audio file">
+    <button id="playEncryptedAudio">Play Encrypted Audio</button>
+    <audio id="audioPlayer" controls></audio>
     
     <h2>DEK Encryption/Decryption</h2>
     <button id="encryptDEK">Encrypt DEK with Public Key</button>
@@ -49,6 +60,33 @@
         base64ToUint8Array: base64 => Uint8Array.from(atob(base64), c => c.charCodeAt(0)),
         textToArrayBuffer: text => new TextEncoder().encode(text),
         arrayBufferToText: buffer => new TextDecoder().decode(buffer),
+
+        // Helper function to increment counter for AES-CTR
+        incrementCounter: (counter, offset) => {
+            const newCounter = new Uint8Array(counter);
+            const counterLength = newCounter.length;
+
+            // Convert counter to BigInt
+            let counterBigInt = BigInt(0);
+            for (let i = 0; i < counterLength; i++) {
+                counterBigInt = (counterBigInt << BigInt(8)) + BigInt(newCounter[i]);
+            }
+
+            // Calculate the block offset
+            const blockSize = 16; // AES block size in bytes
+            const blockOffset = BigInt(Math.floor(offset / blockSize));
+
+            // Add block offset to counter
+            counterBigInt += blockOffset;
+
+            // Convert back to Uint8Array
+            for (let i = counterLength - 1; i >= 0; i--) {
+                newCounter[i] = Number(counterBigInt & BigInt(0xFF));
+                counterBigInt >>= BigInt(8);
+            }
+
+            return newCounter;
+        }
     };
 
     // Cryptographic operations
@@ -71,7 +109,8 @@
 
         generateDEK: () => window.crypto.getRandomValues(new Uint8Array(32)),
 
-        encrypt: async (key, data) => {
+        // Document encryption using AES-GCM (original algorithm)
+        encryptDocument: async (key, data) => {
             const cryptoKey = await window.crypto.subtle.importKey(
                 "raw",
                 key,
@@ -79,7 +118,7 @@
                 false,
                 ['encrypt']
             );
-            const iv = window.crypto.getRandomValues(new Uint8Array(12));
+            const iv = window.crypto.getRandomValues(new Uint8Array(12)); // 96-bit IV for AES-GCM
             const encryptedData = await window.crypto.subtle.encrypt(
                 { name: "AES-GCM", iv },
                 cryptoKey,
@@ -88,7 +127,7 @@
             return { encryptedData, iv };
         },
 
-        decrypt: async (key, data, iv) => {
+        decryptDocument: async (key, data, iv) => {
             const cryptoKey = await window.crypto.subtle.importKey(
                 "raw",
                 key,
@@ -98,6 +137,40 @@
             );
             const decryptedData = await window.crypto.subtle.decrypt(
                 { name: "AES-GCM", iv },
+                cryptoKey,
+                data
+            );
+            return decryptedData;
+        },
+
+        // Audio encryption using AES-CTR for random access decryption
+        encryptAudio: async (key, data) => {
+            const cryptoKey = await window.crypto.subtle.importKey(
+                "raw",
+                key,
+                { name: "AES-CTR" },
+                false,
+                ['encrypt']
+            );
+            const counter = window.crypto.getRandomValues(new Uint8Array(16)); // 128-bit counter
+            const encryptedData = await window.crypto.subtle.encrypt(
+                { name: "AES-CTR", counter, length: 64 },
+                cryptoKey,
+                data
+            );
+            return { encryptedData, counter };
+        },
+
+        decryptAudio: async (key, data, counter) => {
+            const cryptoKey = await window.crypto.subtle.importKey(
+                "raw",
+                key,
+                { name: "AES-CTR" },
+                false,
+                ['decrypt']
+            );
+            const decryptedData = await window.crypto.subtle.decrypt(
+                { name: "AES-CTR", counter, length: 64 },
                 cryptoKey,
                 data
             );
@@ -219,6 +292,7 @@
         decryptedDEK: null,
         encryptedPrivateKey: null,
         decryptedPrivateKeyJwk: null,
+        encryptedAudio: null, // Holds the encrypted audio data and counter
     });
 
     // UI updates
@@ -264,6 +338,11 @@
         if (state.decryptedPrivateKeyJwk) {
             output.innerHTML += `<p><strong>Decrypted Private Key (JWK):</strong> ${JSON.stringify(state.decryptedPrivateKeyJwk, null, 2)}</p>`;
         }
+
+        if (state.encryptedAudio) {
+            output.innerHTML += `<p><strong>Encrypted Audio File is ready for download.</strong></p>`;
+            output.innerHTML += `<p><strong>Counter (Base64):</strong> ${state.encryptedAudio.counter}</p>`;
+        }
     };
 
     const updateStatus = (message, type) => {
@@ -302,7 +381,7 @@
                 if (!dek) throw new Error("Please generate DEK first");
 
                 const text = document.getElementById('documentInput').value;
-                const { encryptedData, iv } = await cryptoOps.encrypt(
+                const { encryptedData, iv } = await cryptoOps.encryptDocument(
                     utils.base64ToUint8Array(dek),
                     utils.textToArrayBuffer(text)
                 );
@@ -323,7 +402,7 @@
                 const { dek, encryptedDoc } = store.getState();
                 if (!dek || !encryptedDoc) throw new Error("Please encrypt a document first");
 
-                const decryptedData = await cryptoOps.decrypt(
+                const decryptedData = await cryptoOps.decryptDocument(
                     utils.base64ToUint8Array(dek),
                     utils.base64ToArrayBuffer(encryptedDoc.encryptedData),
                     utils.base64ToUint8Array(encryptedDoc.iv)
@@ -335,6 +414,145 @@
                 updateStatus('Document decrypted successfully', 'success');
             } catch (error) {
                 updateStatus('Failed to decrypt document: ' + error.message, 'error');
+            }
+        },
+
+        encryptAudio: async () => {
+            try {
+                const { dek } = store.getState();
+                if (!dek) throw new Error("Please generate DEK first");
+
+                const fileInput = document.getElementById('audioFileInput');
+                if (fileInput.files.length === 0) throw new Error("Please select an audio file");
+
+                const file = fileInput.files[0];
+                const arrayBuffer = await file.arrayBuffer();
+
+                // Encrypt the audio file using AES-CTR
+                const { encryptedData, counter } = await cryptoOps.encryptAudio(
+                    utils.base64ToUint8Array(dek),
+                    arrayBuffer
+                );
+
+                store.setState({
+                    encryptedAudio: {
+                        encryptedData,
+                        counter: utils.arrayBufferToBase64(counter),
+                        fileName: file.name + '.enc',
+                    }
+                });
+
+                updateUI(store.getState());
+                updateStatus('Audio file encrypted successfully', 'success');
+            } catch (error) {
+                updateStatus('Failed to encrypt audio file: ' + error.message, 'error');
+            }
+        },
+
+        downloadEncryptedAudio: () => {
+            try {
+                const { encryptedAudio } = store.getState();
+                if (!encryptedAudio) throw new Error("No encrypted audio available");
+
+                // Create a Blob from the encrypted data
+                const blob = new Blob([encryptedAudio.encryptedData], { type: 'application/octet-stream' });
+
+                // Create a download link
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = encryptedAudio.fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                updateStatus('Encrypted audio file downloaded', 'success');
+            } catch (error) {
+                updateStatus('Failed to download encrypted audio file: ' + error.message, 'error');
+            }
+        },
+
+        /**
+            1. Upload audio mp3
+            2. Download to verify
+            3. Note down the counter base64 value in output
+            4. Store the downloaded file where the index page is stored and where you run the server from
+            5. Enter the downloaded file path
+            6. play
+        **/
+        playEncryptedAudio: async () => {
+            try {
+                const { dek } = store.getState();
+                if (!dek) throw new Error("Please generate DEK and decrypt it first");
+
+                const encryptedAudioUrl = document.getElementById('encryptedAudioUrl').value;
+                if (!encryptedAudioUrl) throw new Error("Please enter the URL of the encrypted audio file");
+
+                // Prompt the user to enter the counter value (Base64)
+                const counterBase64 = prompt("Enter the counter value (Base64):");
+                if (!counterBase64) throw new Error("Counter value is required");
+                const counter = utils.base64ToUint8Array(counterBase64);
+
+                // Import the DEK as a CryptoKey
+                const dekKey = await window.crypto.subtle.importKey(
+                    "raw",
+                    utils.base64ToUint8Array(dek),
+                    { name: "AES-CTR" },
+                    false,
+                    ["decrypt"]
+                );
+
+                // Create a MediaSource for streaming
+                const mediaSource = new MediaSource();
+                const audioPlayer = document.getElementById('audioPlayer');
+                audioPlayer.src = URL.createObjectURL(mediaSource);
+
+                mediaSource.addEventListener('sourceopen', async () => {
+                    const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+
+                    // Fetch the encrypted audio data as a stream
+                    const response = await fetch(encryptedAudioUrl);
+                    if (!response.ok) throw new Error("Failed to fetch encrypted audio file");
+
+                    const reader = response.body.getReader();
+                    let offset = 0;
+
+                    async function pump() {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            mediaSource.endOfStream();
+                            return;
+                        }
+
+                        // Decrypt the chunk
+                        const decryptedChunk = await window.crypto.subtle.decrypt(
+                            {
+                                name: "AES-CTR",
+                                counter: utils.incrementCounter(counter, offset),
+                                length: 64,
+                            },
+                            dekKey,
+                            value
+                        );
+
+                        sourceBuffer.appendBuffer(new Uint8Array(decryptedChunk));
+
+                        offset += value.byteLength;
+
+                        // Wait for the sourceBuffer to be ready for more data
+                        if (sourceBuffer.updating) {
+                            await new Promise(resolve => sourceBuffer.addEventListener('updateend', resolve, { once: true }));
+                        }
+
+                        // Continue pumping
+                        pump();
+                    }
+
+                    pump();
+                });
+
+                updateStatus('Playing decrypted audio', 'success');
+            } catch (error) {
+                updateStatus('Failed to play encrypted audio: ' + error.message, 'error');
             }
         },
 
@@ -435,11 +653,16 @@
                 decryptedDEK: null,
                 encryptedPrivateKey: null,
                 decryptedPrivateKeyJwk: null,
+                encryptedAudio: null,
             });
             document.getElementById('documentInput').value = '';
             document.getElementById('passwordInput').value = '';
+            document.getElementById('encryptedAudioUrl').value = '';
             document.getElementById('status').textContent = '';
+            document.getElementById('status').className = '';
             document.getElementById('output').innerHTML = '';
+            const audioPlayer = document.getElementById('audioPlayer');
+            audioPlayer.src = '';
             updateStatus('App state has been reset.', 'success');
         },
     };
@@ -449,6 +672,9 @@
     document.getElementById('generateDEK').addEventListener('click', handlers.generateDEK);
     document.getElementById('encryptDocument').addEventListener('click', handlers.encryptDocument);
     document.getElementById('decryptDocument').addEventListener('click', handlers.decryptDocument);
+    document.getElementById('encryptAudio').addEventListener('click', handlers.encryptAudio);
+    document.getElementById('downloadEncryptedAudio').addEventListener('click', handlers.downloadEncryptedAudio);
+    document.getElementById('playEncryptedAudio').addEventListener('click', handlers.playEncryptedAudio);
     document.getElementById('encryptDEK').addEventListener('click', handlers.encryptDEK);
     document.getElementById('decryptDEK').addEventListener('click', handlers.decryptDEK);
     document.getElementById('encryptPrivateKey').addEventListener('click', handlers.encryptPrivateKey);
